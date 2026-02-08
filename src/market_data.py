@@ -29,13 +29,19 @@ class MarketSnapshot:
     timestamp: datetime
 
 
-def fetch_market_data(pair: str) -> MarketSnapshot | None:
-    """Fetch current market data for a trading pair from CoinGecko."""
-    coin_id = PAIR_TO_COINGECKO.get(pair)
-    if not coin_id:
-        logger.error("Unsupported trading pair: %s", pair)
-        return None
+COINCAP_API = "https://api.coincap.io/v2"
 
+PAIR_TO_COINCAP = {
+    "BTC/USD": "bitcoin",
+    "ETH/USD": "ethereum",
+    "SOL/USD": "solana",
+}
+
+HEADERS = {"User-Agent": "claude-auto-trader/0.1.0"}
+
+
+def _fetch_from_coingecko(pair: str, coin_id: str) -> MarketSnapshot | None:
+    """Try fetching from CoinGecko first."""
     try:
         resp = requests.get(
             f"{COINGECKO_API}/coins/{coin_id}",
@@ -45,6 +51,7 @@ def fetch_market_data(pair: str) -> MarketSnapshot | None:
                 "community_data": "false",
                 "developer_data": "false",
             },
+            headers=HEADERS,
             timeout=10,
         )
         resp.raise_for_status()
@@ -60,8 +67,51 @@ def fetch_market_data(pair: str) -> MarketSnapshot | None:
             timestamp=datetime.now(timezone.utc),
         )
     except requests.RequestException as e:
-        logger.error("Failed to fetch market data for %s: %s", pair, e)
+        logger.warning("CoinGecko failed for %s: %s, trying fallback...", pair, e)
         return None
+
+
+def _fetch_from_coincap(pair: str, coin_id: str) -> MarketSnapshot | None:
+    """Fallback: fetch from CoinCap API."""
+    try:
+        resp = requests.get(
+            f"{COINCAP_API}/assets/{coin_id}",
+            headers=HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        asset = resp.json()["data"]
+
+        return MarketSnapshot(
+            pair=pair,
+            price=float(asset["priceUsd"]),
+            volume_24h=float(asset["volumeUsd24Hr"]),
+            change_24h_pct=float(asset["changePercent24Hr"]),
+            market_cap=float(asset["marketCapUsd"]),
+            timestamp=datetime.now(timezone.utc),
+        )
+    except (requests.RequestException, KeyError, ValueError) as e:
+        logger.error("CoinCap also failed for %s: %s", pair, e)
+        return None
+
+
+def fetch_market_data(pair: str) -> MarketSnapshot | None:
+    """Fetch current market data for a trading pair. Tries CoinGecko then CoinCap."""
+    coingecko_id = PAIR_TO_COINGECKO.get(pair)
+    coincap_id = PAIR_TO_COINCAP.get(pair)
+
+    if not coingecko_id:
+        logger.error("Unsupported trading pair: %s", pair)
+        return None
+
+    result = _fetch_from_coingecko(pair, coingecko_id)
+    if result:
+        return result
+
+    if coincap_id:
+        return _fetch_from_coincap(pair, coincap_id)
+
+    return None
 
 
 def format_market_summary(snapshot: MarketSnapshot) -> str:
